@@ -330,9 +330,8 @@ export default function Dashboard() {
     humidity: SENSOR_CONFIG.humidity.defaultThreshold,
   });
 
-  // 차량 위치 (0~100%) 및 순찰 상태
+  // 차량 위치 (0~100%, 마름모 트랙을 순환) 및 순찰 상태
   const [position, setPosition] = useState(6);
-  const [direction, setDirection] = useState(1);
   const [moving, setMoving] = useState(true);
 
   // 오디오 경보 on/off
@@ -469,24 +468,18 @@ export default function Dashboard() {
         return Number(clamp(v + delta, cfg.min, cfg.max).toFixed(1));
       });
 
-      // 차량 위치 이동 (왕복 순찰)
-      setPosition((p) => {
-        let np = p + direction * (2.5 + Math.random() * 2);
-        if (np >= 96) {
-          np = 96;
-          setDirection(-1);
-        } else if (np <= 4) {
-          np = 4;
-          setDirection(1);
+      // 차량 위치 이동 (마름모 트랙 반시계 순환, 정차 중엔 멈춤 · 한 바퀴 약 20초)
+      setMoving((m) => {
+        const nextMoving = Math.random() < 0.85 ? true : !m;
+        if (nextMoving) {
+          setPosition((p) => (p + (11 + Math.random() * 3)) % 100);
         }
-        return np;
+        return nextMoving;
       });
-
-      setMoving((m) => (Math.random() < 0.85 ? true : !m));
     }, 2500);
 
     return () => clearInterval(tick);
-  }, [direction]);
+  }, []);
 
   /* ------------------------- 구역 진입 로그 ------------------------- */
   const prevZoneRef = useRef(currentZone.name);
@@ -1354,49 +1347,95 @@ function LogPanel({ log }) {
 
 /* ------------------------------------------------------------------
  * 실시간 위치 관제 맵 (우측 하단) — 마름모(다이아몬드) 순찰 경로형
- * 중앙에 중앙처리 시스템 허브를 두고, 4개 꼭짓점에 각 구역(원위치·온도·
- * 습도·광도)을 배치합니다. AMR 아이콘이 마름모 테두리를 따라 반시계
- * 방향으로 순환 이동하며, 이상 발생 구역은 빨간색으로 강조됩니다.
+ * 중앙에 중앙처리 시스템 허브를 두고, 4개 꼭짓점(Z-1 원위치 · Z-2 A구역
+ * · Z-4 C구역 · Z-3 B구역)에 각 구역을 배치합니다. AMR이 마름모 테두리를
+ * 반시계 방향으로 순환하며, 현재 향하고 있는 구역이 "점검 중"으로 표시되고
+ * 임계치 초과 구역은 빨간색(위험 발생)으로 강조됩니다.
  * ------------------------------------------------------------------ */
 
-// 마름모 4개 꼭짓점 좌표(%) — 상:습도(C) · 우:광도(B) · 하:원위치(출발) · 좌:온도(A)
+// 마름모 4개 꼭짓점 좌표(%) — 상:C(습도) · 우:B(광도/코로나) · 하:Z-1(원위치) · 좌:A(온도)
+// 카드가 밖으로 튀어나가 잘리지 않도록 꼭짓점을 안쪽으로 넉넉히 배치합니다.
 const DIAMOND_POINTS = {
-  top: { x: 50, y: 8 },
-  right: { x: 92, y: 50 },
-  bottom: { x: 50, y: 92 },
-  left: { x: 8, y: 50 },
+  top: { x: 50, y: 18 },
+  right: { x: 80, y: 50 },
+  bottom: { x: 50, y: 82 },
+  left: { x: 20, y: 50 },
 };
 
-// position(0~100)을 마름모 테두리 위의 좌표로 변환 (하→좌→상→우→하, 반시계 방향)
-function positionToDiamondXY(position) {
-  const segs = [
-    [DIAMOND_POINTS.bottom, DIAMOND_POINTS.left],
-    [DIAMOND_POINTS.left, DIAMOND_POINTS.top],
-    [DIAMOND_POINTS.top, DIAMOND_POINTS.right],
-    [DIAMOND_POINTS.right, DIAMOND_POINTS.bottom],
-  ];
+// 순환 순서: 원위치(하) → A(좌) → C(상) → B(우) → 원위치(하), 반시계 방향
+const ZONE_META = [
+  { code: "Z-1", key: "home", label: "원위치", title: "출발 · 복귀 지점", cond: "감시 항목 없음", corner: "bottom", point: DIAMOND_POINTS.bottom, sensorKey: null, sensorLabel: "없음", accent: "muted", icon: MapPin, legend: null },
+  { code: "Z-2", key: "A", label: "A구역", title: "기기 과열", cond: "TEMP > T_limit", corner: "left", point: DIAMOND_POINTS.left, sensorKey: "temp", sensorLabel: "온도", accent: "caution", icon: Thermometer, legend: "기기 과열 (A)" },
+  { code: "Z-4", key: "C", label: "C구역", title: "습도 문제", cond: "HUMID > H_limit", corner: "top", point: DIAMOND_POINTS.top, sensorKey: "humidity", sensorLabel: "습도", accent: "beacon", icon: Droplets, legend: "습도 문제 (C)" },
+  { code: "Z-3", key: "B", label: "B구역", title: "코로나 방전", cond: "LIGHT > L_limit", corner: "right", point: DIAMOND_POINTS.right, sensorKey: "lux", sensorLabel: "광도", accent: "nominal", icon: Sun, legend: "코로나 문제 (B)" },
+];
+// 세그먼트 i는 ZONE_META[i] → ZONE_META[(i+1)%4] 로 이동하는 구간이며, 도착지(다음 구역)가 "현재 향하는 구역"입니다.
+
+function segmentInfo(position) {
   const t = clamp(position, 0, 100) / 100;
-  const segLen = 1 / segs.length;
-  const segIndex = Math.min(segs.length - 1, Math.floor(t / segLen));
+  const segLen = 1 / 4;
+  const segIndex = Math.min(3, Math.floor(t / segLen));
   const localT = (t - segIndex * segLen) / segLen;
-  const [from, to] = segs[segIndex];
+  const from = ZONE_META[segIndex].point;
+  const to = ZONE_META[(segIndex + 1) % 4].point;
   return {
-    x: from.x + (to.x - from.x) * localT,
-    y: from.y + (to.y - from.y) * localT,
+    segIndex,
+    localT,
+    destZone: ZONE_META[(segIndex + 1) % 4],
+    xy: { x: from.x + (to.x - from.x) * localT, y: from.y + (to.y - from.y) * localT },
   };
 }
 
+const ZONE_ACCENT_CLASSES = {
+  muted: { text: "text-muted", border: "border-line", dot: "bg-muted", ring: "border-muted" },
+  caution: { text: "text-caution", border: "border-caution/50", dot: "bg-caution", ring: "border-caution" },
+  beacon: { text: "text-beacon", border: "border-beacon/50", dot: "bg-beacon", ring: "border-beacon" },
+  nominal: { text: "text-nominal", border: "border-nominal/50", dot: "bg-nominal", ring: "border-nominal" },
+};
+
 function MapPanel({ zone, position, moving, isDanger, temp, humidity, lux, thresholds, alerts }) {
-  const carXY = positionToDiamondXY(position);
-  const pathD = `M ${DIAMOND_POINTS.bottom.x} ${DIAMOND_POINTS.bottom.y} L ${DIAMOND_POINTS.left.x} ${DIAMOND_POINTS.left.y} L ${DIAMOND_POINTS.top.x} ${DIAMOND_POINTS.top.y} L ${DIAMOND_POINTS.right.x} ${DIAMOND_POINTS.right.y} Z`;
+  const [showDetail, setShowDetail] = useState(true);
+  const [showDirHint, setShowDirHint] = useState(false);
+
+  const { segIndex, localT, destZone, xy } = segmentInfo(position);
+  const sensorValues = { temp: `${temp.toFixed(1)}°C`, humidity: `${humidity.toFixed(1)}%`, lux: `${Math.round(lux)}Lux` };
+  const sensorAlert = { temp: alerts.temp, humidity: alerts.humidity, lux: alerts.lux };
+  const progress = Math.round(localT * 100);
 
   return (
     <div className="rounded-xl border border-line bg-panel p-4">
-      <div className="mb-3 flex items-center justify-between">
+      {/* 헤더: 제목 + 순환 경로 요약 + 버튼 2개 */}
+      <div className="mb-1 flex items-center justify-between gap-2">
         <h2 className="flex items-center gap-2 font-display text-base font-semibold tracking-wide">
           <MapPin size={18} className="text-beacon" />
           실시간 위치 관제 맵
         </h2>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setShowDirHint((v) => !v)}
+            className="flex items-center gap-1 rounded-md border border-line bg-panel-2 px-2 py-1 text-[11px] font-semibold text-muted hover:text-ink"
+          >
+            <Radar size={12} /> 진행 방향
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowDetail((v) => !v)}
+            className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold ${
+              showDetail ? "border-beacon/50 bg-beacon/10 text-beacon" : "border-line bg-panel-2 text-muted"
+            }`}
+          >
+            <ListChecks size={12} /> 구역 상세
+          </button>
+        </div>
+      </div>
+      <p className="mb-3 font-mono text-[11px] text-muted">
+        원위치 → A구역 → C구역 → B구역 반시계 순환 · 한 바퀴 약 20초
+        {showDirHint && " · 현재 반시계(counterclockwise) 방향으로 고정 순찰 중입니다"}
+      </p>
+
+      {/* 상태 칩 */}
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
         <span
           className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
             moving ? "bg-beacon/10 text-beacon" : "bg-panel-2 text-muted"
@@ -1405,13 +1444,26 @@ function MapPanel({ zone, position, moving, isDanger, temp, humidity, lux, thres
           <span className={`h-1.5 w-1.5 rounded-full ${moving ? "bg-beacon animate-pulse" : "bg-muted"}`} />
           {moving ? "순찰 이동 중" : "정차 / 스캔 중"}
         </span>
+        <span
+          className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+            ZONE_ACCENT_CLASSES[destZone.accent].border
+          } ${ZONE_ACCENT_CLASSES[destZone.accent].text} bg-panel-2`}
+        >
+          {destZone.code} {destZone.label} {destZone.title !== "출발 · 복귀 지점" ? `(${destZone.title})` : ""}
+        </span>
+        {isDanger && (
+          <span className="flex items-center gap-1 rounded-full bg-danger/15 px-2 py-0.5 text-[11px] font-semibold text-danger">
+            <AlertTriangle size={11} /> 위험 발생
+          </span>
+        )}
       </div>
 
-      <div className="relative aspect-square w-full overflow-hidden rounded-lg border border-line bg-hull grid-texture">
-        {/* 마름모 순찰 경로 */}
-        <svg viewBox="0 0 100 100" className="absolute inset-0 h-full w-full">
+      {/* 마름모 다이어그램: 카드가 튀어나갈 여백을 바깥 프레임에 확보 */}
+      <div className="relative rounded-lg border border-line bg-hull grid-texture px-9 py-8 sm:px-16 sm:py-8">
+        <div className="relative aspect-square w-full">
+        <svg viewBox="0 0 100 100" className="absolute inset-0 h-full w-full overflow-visible">
           <path
-            d={pathD}
+            d="M 50 82 L 20 50 L 50 18 L 80 50 Z"
             fill="none"
             stroke="currentColor"
             strokeWidth="0.8"
@@ -1419,128 +1471,157 @@ function MapPanel({ zone, position, moving, isDanger, temp, humidity, lux, thres
             className={isDanger ? "text-danger/50" : "text-beacon/30"}
           />
           <path
-            d={pathD}
+            d="M 50 82 L 20 50 L 50 18 L 80 50 Z"
             fill="none"
             stroke="currentColor"
             strokeWidth="1.6"
-            className={isDanger ? "text-danger/70 animate-pulse" : "text-beacon/50"}
             strokeDasharray="6 94"
             strokeDashoffset={-position}
             pathLength="100"
+            className={isDanger ? "text-danger/70 animate-pulse" : "text-beacon/50"}
           />
         </svg>
 
-        {/* 중앙 허브: 중앙처리 시스템 */}
+        {/* 중앙 허브 */}
         <div
           className="absolute z-10 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1 rounded-lg border border-line bg-panel-2/90 px-3 py-2 text-center shadow-glow-beacon"
           style={{ left: "50%", top: "50%" }}
         >
-          <Radar size={16} className="text-beacon" />
+          <Radar size={16} className={isDanger ? "text-danger" : "text-beacon"} />
           <span className="whitespace-nowrap font-display text-[10px] font-semibold text-ink">중앙처리 시스템</span>
+          <span className={`font-mono text-[9px] font-bold ${isDanger ? "text-danger" : "text-nominal"}`}>
+            {isDanger ? "WARNING" : "NORMAL"}
+          </span>
         </div>
 
-        {/* 이동 중인 AMR 차량 아이콘 */}
+        {/* 이동 중인 AMR */}
         <div
-          className={`absolute z-20 grid h-8 w-8 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 transition-all duration-[2200ms] ease-linear ${
+          className={`absolute z-20 grid h-8 w-8 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 transition-all duration-[1200ms] ease-linear ${
             isDanger ? "border-danger" : "border-beacon"
           }`}
-          style={{ left: `${carXY.x}%`, top: `${carXY.y}%` }}
+          style={{ left: `${xy.x}%`, top: `${xy.y}%` }}
         >
-          <div
-            className={`grid h-full w-full place-items-center rounded-full ${
-              isDanger ? "bg-danger/20 shadow-glow-danger" : "bg-beacon/20 shadow-glow-beacon"
-            }`}
-          >
+          <div className={`grid h-full w-full place-items-center rounded-full ${isDanger ? "bg-danger/20 shadow-glow-danger" : "bg-beacon/20 shadow-glow-beacon"}`}>
             <Bot size={15} className={isDanger ? "text-danger animate-pulse" : "text-beacon"} />
           </div>
         </div>
 
-        {/* 꼭짓점 노드: 좌(온도) · 상(습도) · 우(광도) · 하(원위치) */}
-        <DiamondNode
-          point={DIAMOND_POINTS.left}
-          align="left"
-          label="A구역 · 기기 과열"
-          sub={`온도 임계 ${thresholds.temp}°C`}
-          icon={Thermometer}
-          danger={alerts.temp}
-          accent="danger"
-          value={`${temp.toFixed(1)}°C`}
-        />
-        <DiamondNode
-          point={DIAMOND_POINTS.top}
-          align="top"
-          label="C구역 · 습도 문제"
-          sub={`습도 임계 ${thresholds.humidity}%`}
-          icon={Droplets}
-          danger={alerts.humidity}
-          accent="beacon"
-          value={`${humidity.toFixed(1)}%`}
-        />
-        <DiamondNode
-          point={DIAMOND_POINTS.right}
-          align="right"
-          label="B구역 · 광도 이상"
-          sub={`광도 임계 ${thresholds.lux}Lux`}
-          icon={Sun}
-          danger={alerts.lux}
-          accent="caution"
-          value={`${Math.round(lux)}Lux`}
-        />
-        <DiamondNode
-          point={DIAMOND_POINTS.bottom}
-          align="bottom"
-          label="원위치 · 출발점"
-          sub="측정 안 함"
-          icon={MapPin}
-          danger={isDanger}
-          accent="beacon"
-          value={zone}
-        />
+        {/* 4개 꼭짓점: 원형 배지 + 정보 카드 */}
+        {ZONE_META.map((z) => {
+          const isActive = destZone.key === z.key;
+          const danger = z.sensorKey ? sensorAlert[z.sensorKey] : false;
+          const a = ZONE_ACCENT_CLASSES[z.accent];
+          return (
+            <DiamondNode
+              key={z.key}
+              zone={z}
+              active={isActive}
+              danger={danger}
+              accentClasses={a}
+              value={z.sensorKey ? sensorValues[z.sensorKey] : null}
+            />
+          );
+        })}
 
         <CornerBrackets />
+        </div>
       </div>
 
+      {/* 범례 + 진행률/담당 센서 */}
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-muted">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {ZONE_META.filter((z) => z.legend).map((z) => (
+            <span key={z.key} className="flex items-center gap-1">
+              <span className={`h-2 w-2 rounded-full ${ZONE_ACCENT_CLASSES[z.accent].dot}`} />
+              {z.legend}
+            </span>
+          ))}
+          <span className="flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full bg-danger" />
+            위험 발생
+          </span>
+        </div>
+        <span className="rounded-md border border-line bg-panel-2 px-2 py-1 text-ink">
+          진행률 <b className="text-beacon">{progress}%</b> · 담당 센서 {destZone.sensorLabel}
+        </span>
+      </div>
+
+      {/* 구역별 상태 (토글) */}
+      {showDetail && (
+        <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+          {[ZONE_META[0], ZONE_META[1], ZONE_META[2], ZONE_META[3]].map((z) => {
+            const danger = z.sensorKey ? sensorAlert[z.sensorKey] : false;
+            const isActive = destZone.key === z.key;
+            const status = danger ? "위험 발생" : isActive ? "점검 중" : "대기";
+            const a = ZONE_ACCENT_CLASSES[z.accent];
+            return (
+              <div key={z.key} className={`rounded-lg border p-2 ${danger ? "border-danger/60 bg-danger/10" : "border-line bg-panel-2/70"}`}>
+                <p className="font-mono text-[10px] text-muted">
+                  {z.code} {z.label}
+                </p>
+                <p className={`flex items-center gap-1 text-[11px] font-semibold ${danger ? "text-danger" : isActive ? a.text : "text-muted"}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${danger ? "bg-danger" : isActive ? a.dot : "bg-muted"}`} />
+                  {status}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <p className="mt-2 text-[11px] text-muted font-mono">
-        마름모 순찰 경로를 따라 AMR이 반시계 방향으로 이동하며, 각 꼭짓점 구역(A 온도·B 광도·C 습도)의 이상 발생 시 해당 노드가 빨간색으로 강조됩니다.
+        로봇이 마름모 트랙을 한 방향으로 순환하며 4개 지점을 점검합니다. 현재 향하고 있는 구역이 "점검 중"으로 표시되며, 임계치를 초과한 구역은 빨간색(위험 발생)으로 강조됩니다. (원위치는 출발·복귀 지점이라 감시 항목이 없습니다.)
       </p>
     </div>
   );
 }
 
-/** 마름모 꼭짓점에 배치되는 구역 정보 카드 */
-function DiamondNode({ point, align, label, sub, icon: Icon, danger, accent, value }) {
-  const a = ACCENTS[accent];
-
+/** 마름모 꼭짓점의 원형 배지 + 정보 카드 */
+function DiamondNode({ zone, active, danger, accentClasses, value }) {
+  const Icon = zone.icon;
   const alignClass = {
-    left: "items-end text-right -translate-x-full -translate-y-1/2 pr-3",
-    top: "items-center text-center -translate-x-1/2 -translate-y-full pb-3",
-    right: "items-start text-left -translate-y-1/2 pl-3",
-    bottom: "items-center text-center -translate-x-1/2 pt-3",
-  }[align];
+    left: "items-end text-right -translate-x-[calc(100%+14px)] -translate-y-1/2",
+    top: "items-center text-center -translate-x-1/2 -translate-y-[calc(100%+14px)]",
+    right: "items-start text-left translate-x-[14px] -translate-y-1/2",
+    bottom: "items-center text-center -translate-x-1/2 translate-y-[14px]",
+  }[zone.corner];
 
   return (
-    <div
-      className={`absolute z-10 flex w-32 flex-col gap-1 ${alignClass}`}
-      style={{ left: `${point.x}%`, top: `${point.y}%` }}
-    >
+    <>
+      {/* 원형 배지 (Z-1~Z-4) */}
       <div
-        className={`w-full rounded-lg border p-2 transition-colors ${
-          danger ? "border-danger/60 bg-danger/[0.14] animate-shake-sm" : `${a.border} bg-panel/90`
+        className={`absolute z-10 grid h-7 w-7 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 bg-panel font-mono text-[10px] font-bold ${
+          danger ? "border-danger text-danger animate-pulse" : active ? `${accentClasses.ring} ${accentClasses.text}` : "border-line text-muted"
         }`}
+        style={{ left: `${zone.point.x}%`, top: `${zone.point.y}%` }}
       >
-        <div className={`flex items-center gap-1.5 ${align === "left" ? "justify-end" : align === "right" ? "justify-start" : "justify-center"}`}>
-          {danger && <AlertTriangle size={11} className="text-danger animate-pulse" />}
-          <Icon size={12} className={danger ? "text-danger" : a.text} />
-          <span className={`font-display text-[10px] font-semibold tracking-wide ${danger ? "text-danger" : "text-ink"}`}>
-            {label}
-          </span>
-        </div>
-        <p className={`mt-0.5 font-mono text-xs font-bold tabular-nums ${danger ? "text-danger" : "text-ink"}`}>
-          {value}
-        </p>
-        <p className="text-[9px] text-muted font-mono">{sub}</p>
+        {zone.code.replace("Z-", "")}
       </div>
-    </div>
+
+      {/* 정보 카드 */}
+      <div
+        className={`absolute z-10 flex w-32 flex-col gap-1 ${alignClass}`}
+        style={{ left: `${zone.point.x}%`, top: `${zone.point.y}%` }}
+      >
+        <div
+          className={`w-full rounded-lg border p-2 transition-colors ${
+            danger ? "border-danger/60 bg-danger/[0.14] animate-shake-sm" : active ? `${accentClasses.border} bg-panel/95` : "border-line bg-panel/80"
+          }`}
+        >
+          <div className={`flex items-center gap-1.5 ${zone.corner === "left" ? "justify-end" : zone.corner === "right" ? "justify-start" : "justify-center"}`}>
+            {danger && <AlertTriangle size={11} className="text-danger animate-pulse" />}
+            <Icon size={12} className={danger ? "text-danger" : active ? accentClasses.text : "text-muted"} />
+            <span className={`font-display text-[10px] font-semibold tracking-wide ${danger ? "text-danger" : "text-ink"}`}>
+              {zone.code} · {zone.label}
+              {active && !danger && <span className={`ml-1 ${accentClasses.text}`}>점검 중</span>}
+            </span>
+          </div>
+          <p className={`mt-0.5 font-mono text-xs font-bold ${danger ? "text-danger" : "text-ink"}`}>{zone.title}</p>
+          <p className="text-[9px] text-muted font-mono">{zone.cond}</p>
+          {value && <p className={`mt-0.5 font-mono text-[10px] font-semibold ${danger ? "text-danger" : "text-muted"}`}>{value}</p>}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1555,3 +1636,4 @@ function CornerBrackets() {
     </>
   );
 }
+
