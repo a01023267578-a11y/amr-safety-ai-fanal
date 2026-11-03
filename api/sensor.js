@@ -31,9 +31,15 @@ export default async function handler(req, res) {
     const data = out.result ? JSON.parse(out.result) : {};
 
     data.demo = String(flag.result) === '1';
-    if (data.demo && typeof data.temp === 'number') {
-      data.realTemp = data.temp;                         // 진짜 값은 따로 보관
-      data.temp = Number((data.temp + 30).toFixed(1));   // 진짜 값 + 30도
+    if (data.demo) {
+      if (typeof data.temp === 'number') {
+        data.realTemp = data.temp;                           // 진짜 값은 따로 보관
+        data.temp = Number((data.temp + 30).toFixed(1));     // 진짜 값 + 30도
+      }
+      if (typeof data.humidity === 'number') {
+        data.realHumidity = data.humidity;                   // 진짜 값은 따로 보관
+        data.humidity = Number(Math.min(100, data.humidity + 30).toFixed(1)); // 진짜 값 + 30% (최대 100)
+      }
     }
     return res.status(200).json(data);
   }
