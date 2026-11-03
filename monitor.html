@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>로봇 센서 모니터</title>
+<style>
+  body { font-family: sans-serif; background: #f4f6f8; margin: 0; padding: 24px; text-align: center; }
+  h1 { font-size: 22px; }
+  .cards { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
+  .card { background: white; border-radius: 12px; padding: 24px 32px; min-width: 150px; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+  .label { color: #666; font-size: 14px; }
+  .value { font-size: 40px; font-weight: bold; margin-top: 8px; }
+  #status { margin-top: 24px; color: #888; font-size: 14px; }
+</style>
+</head>
+<body>
+  <h1>로봇 센서 모니터</h1>
+  <div class="cards">
+    <div class="card"><div class="label">온도 (°C)</div><div class="value" id="temp">-</div></div>
+    <div class="card"><div class="label">습도 (%)</div><div class="value" id="hum">-</div></div>
+    <div class="card"><div class="label">밝기 (lux)</div><div class="value" id="lux">-</div></div>
+  </div>
+  <div id="status">불러오는 중...</div>
+
+<script>
+async function update() {
+  try {
+    const r = await fetch('/api/sensor');
+    const d = await r.json();
+    if (d.time) {
+      document.getElementById('temp').textContent = d.temp;
+      document.getElementById('hum').textContent = d.humidity;
+      document.getElementById('lux').textContent = d.lux;
+      const ago = Math.round((Date.now() - new Date(d.time)) / 1000);
+      document.getElementById('status').textContent = ago + '초 전 업데이트';
+    } else {
+      document.getElementById('status').textContent = '아직 받은 값이 없어요';
+    }
+  } catch (e) {
+    document.getElementById('status').textContent = '불러오기 실패';
+  }
+}
+update();
+setInterval(update, 3000);
+</script>
+</body>
+</html>
