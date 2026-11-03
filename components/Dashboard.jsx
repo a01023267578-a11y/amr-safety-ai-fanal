@@ -1,5 +1,5 @@
 "use client";
-
+import SensorValues from "@/components/SensorValues";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Thermometer,
@@ -444,30 +444,20 @@ export default function Dashboard() {
   useEffect(() => {
     const tick = setInterval(() => {
       // 일정 확률로 임계치를 넘는 '이상 이벤트'를 의도적으로 발생시킴
-      const spike = Math.random() < 0.16;
-
-      setTemp((v) => {
-        const cfg = SENSOR_CONFIG.temp;
-        const delta = spike
-          ? cfg.step * (2 + Math.random() * 3)
-          : (Math.random() - 0.55) * cfg.step;
-        return Number(clamp(v + delta, cfg.min, cfg.max).toFixed(1));
-      });
-      setLux((v) => {
-        const cfg = SENSOR_CONFIG.lux;
-        const delta = spike
-          ? cfg.step * (3 + Math.random() * 4)
-          : (Math.random() - 0.55) * cfg.step;
-        return Math.round(clamp(v + delta, cfg.min, cfg.max));
-      });
-      setHumidity((v) => {
-        const cfg = SENSOR_CONFIG.humidity;
-        const delta = spike
-          ? cfg.step * (2 + Math.random() * 3)
-          : (Math.random() - 0.55) * cfg.step;
-        return Number(clamp(v + delta, cfg.min, cfg.max).toFixed(1));
-      });
-
+      // 진짜 센서값 읽기 (3초에 한 번만 요청)
+      const now = Date.now();
+      if (!window.__lastSensorFetch || now - window.__lastSensorFetch > 3000) {
+        window.__lastSensorFetch = now;
+        fetch("/api/sensor", { cache: "no-store" })
+          .then((r) => r.json())
+          .then((d) => {
+            if (!d.time) return;
+            if (typeof d.temp === "number") setTemp(Number(d.temp.toFixed(1)));
+            if (typeof d.lux === "number") setLux(Math.round(d.lux));
+            if (typeof d.humidity === "number") setHumidity(Number(d.humidity.toFixed(1)));
+          })
+          .catch(() => {});
+      }
       // 차량 위치 이동 (마름모 트랙 반시계 순환, 정차 중엔 멈춤 · 한 바퀴 약 20초)
       setMoving((m) => {
         const nextMoving = Math.random() < 0.85 ? true : !m;
